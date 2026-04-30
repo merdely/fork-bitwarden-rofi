@@ -125,7 +125,7 @@ rofi_menu() {
 
   msg="<b>$KB_SYNC</b>: sync | <b>$KB_URLSEARCH</b>: urls | <b>$KB_NAMESEARCH</b>: names | <b>$KB_FOLDERSELECT</b>: folders | <b>$KB_TOTPCOPY</b>: totp | <b>$KB_LOCK</b>: lock"
 
-  if [[ ! -z "$AUTOTYPE_MODE" ]]; then
+  [[ ! -z "$AUTOTYPE_MODE" ]] && {
     actions+=(
       -kb-custom-5 $KB_TYPEALL
       -kb-custom-6 $KB_TYPEUSER
@@ -236,7 +236,7 @@ on_rofi_exit() {
     13) show_folders;;
     17) copy_totp "$2";;
     18) lock_vault;;
-    19) copy_uri "$2";;
+    19) copy_url "$2";;
     14) auto_type all "$2";;
     15) auto_type username "$2";;
     16) auto_type password "$2";;
@@ -411,19 +411,19 @@ copy_totp() {
 
 # Copy the URL
 # $1: item array
-copy_uri() {
+copy_url() {
   if not_unique "$1"; then
     ITEMS="$item_array"
     show_full_items
   else
     id=$(echo "$1" | jq -r ".[0].id")
 
-    if ! uri=$(bw --session "$BW_HASH" get uri "$id"); then
-      exit_error 1 "$uri"
+    if ! url=$(bw --session "$BW_HASH" get uri "$id"); then
+      exit_error 1 "$url"
     fi
 
-    echo -n "$uri" | clipboard-set
-    notify-send "URI Copied"
+    echo -n "$url" | clipboard-set
+    notify-send "URL Copied"
   fi
 }
 
