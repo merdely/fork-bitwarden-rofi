@@ -120,7 +120,7 @@ rofi_menu() {
     -kb-custom-4 $KB_FOLDERSELECT
     -kb-custom-8 $KB_TOTPCOPY
     -kb-custom-9 $KB_LOCK
-    -kb-custom-10 $KB_URICOPY
+    -kb-custom-10 $KB_URLCOPY
   )
 
   msg="<b>$KB_SYNC</b>: sync | <b>$KB_URLSEARCH</b>: urls | <b>$KB_NAMESEARCH</b>: names | <b>$KB_FOLDERSELECT</b>: folders | <b>$KB_TOTPCOPY</b>: totp | <b>$KB_LOCK</b>: lock"
@@ -135,7 +135,7 @@ rofi_menu() {
     msg+="
 <b>$KB_TYPEALL</b>: Type all  | <b>$KB_TYPEUSER</b>: Type user | <b>$KB_TYPEPASS</b>: Type pass | <b>$KB_TYPETOTP</b>: Type totp"
     msg+="
-<b>$KB_URICOPY</b>: Copy uri"
+<b>$KB_URLCOPY</b>: Copy url"
   }
 
   rofi -dmenu -p 'Name' \
@@ -505,7 +505,7 @@ Quick Actions:
   $KB_FOLDERSELECT  Search through folders
 
   $KB_TOTPCOPY  Copy the TOTP
-  $KB_URICOPY  Copy the URL
+  $KB_URLCOPY  Copy the URL
   $KB_TYPEALL  Autotype the username and password [needs xdotool or ydotool]
   $KB_TYPEUSER  Autotype the username [needs xdotool or ydotool]
   $KB_TYPEPASS  Autotype the password [needs xdotool or ydotool]
