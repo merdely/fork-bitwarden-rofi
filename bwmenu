@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rofi extension for BitWarden-cli
 NAME="$(basename "$0")"
-VERSION="0.4"
+VERSION="0.5"
 DEFAULT_CLEAR=5
 BW_HASH=
 
@@ -12,9 +12,12 @@ AUTO_LOCK=900 # 15 minutes, default for bitwarden apps
 
 # Holds the available items in memory
 ITEMS=
+CACHE_FILE=/tmp/bwmenu/logins.gpg
 
 # Stores which command will be used to emulate keyboard type
 AUTOTYPE_MODE=
+# Stores the argument need by xdotool to clear the modifiers (shift, control, alt, ...) first
+CLEAR_MODIFIERS=
 
 # Stores which command will be used to deal with clipboards
 CLIPBOARD_MODE=
@@ -24,16 +27,17 @@ CLIPBOARD_MODE=
 ENTER_CMD=copy_password
 
 # Keyboard shortcuts
-KB_SYNC="Alt+r"
-KB_URLSEARCH="Alt+u"
-KB_NAMESEARCH="Alt+n"
-KB_FOLDERSELECT="Alt+c"
-KB_TOTPCOPY="Alt+t"
-KB_LOCK="Alt+L"
-KB_TYPEALL="Alt+1"
-KB_TYPEUSER="Alt+2"
-KB_TYPEPASS="Alt+3"
-KB_URICOPY="Alt+4"
+: ${KB_SYNC="Alt+r"}
+: ${KB_URLSEARCH="Alt+u"}
+: ${KB_NAMESEARCH="Alt+n"}
+: ${KB_FOLDERSELECT="Alt+c"}
+: ${KB_TOTPCOPY="Alt+t"}
+: ${KB_URLCOPY="Alt+C"}
+: ${KB_LOCK="Alt+L"}
+: ${KB_TYPEALL="Alt+1"}
+: ${KB_TYPEUSER="Alt+2"}
+: ${KB_TYPEPASS="Alt+3"}
+: ${KB_TYPETOTP="Alt+4"}
 
 # Item type classification
 TYPE_LOGIN=1
@@ -50,8 +54,12 @@ DIR="$(dirname "$(readlink -f "$0")")"
 source "$DIR/lib-bwmenu"
 
 ask_password() {
-  mpw=$(printf '' | rofi -dmenu -p "Master Password" -password -l 0) || exit $?
-  echo "$mpw" | bw unlock 2>/dev/null | grep 'export' | sed -E 's/.*export BW_SESSION="(.*==)"$/\1/' || exit_error $? "Could not unlock vault"
+  rm $CACHE_FILE
+  mpw=$(printf '' | rofi -dmenu -p "Master Password" -password -l 0 ${ROFI_OPTIONS[@]}) || exit $?
+  if ! out="$(bw --raw --nointeraction unlock "$mpw" 2>&1)"; then
+    exit_error 1 "Could not unlock vault: $out"
+  fi
+  echo "$out"
 }
 
 get_session_key() {
@@ -60,11 +68,10 @@ get_session_key() {
     BW_HASH=$(ask_password)
   else
     if ! key_id=$(keyctl request user bw_session 2>/dev/null); then
-      session=$(ask_password)
-      [[ -z "$session" ]] && exit_error 1 "Could not unlock vault"
+      session=$(ask_password) || exit $?
       key_id=$(echo "$session" | keyctl padd user bw_session @u)
     fi
-    
+
     if [ $AUTO_LOCK -gt 0 ]; then
       keyctl timeout "$key_id" $AUTO_LOCK
     fi
@@ -72,19 +79,33 @@ get_session_key() {
   fi
 }
 
+# Load encrypted passwords from cache if exists
+load_cache() {
+  if [ -f "$CACHE_FILE" ]; then
+    ITEMS=$(gpg --quiet -d --batch --passphrase $BW_HASH --cipher-algo AES256 $CACHE_FILE)
+  else
+    load_items
+  fi
+}
+
 # source the hash file to gain access to the BitWarden CLI
 # Pre fetch all the items
 load_items() {
-  if ! ITEMS=$(bw list items --session "$BW_HASH" 2>/dev/null); then
-    exit_error $? "Could not load items"
+  if ! ITEMS=$(bw --nointeraction list items --session "$BW_HASH" 2>/dev/null); then
+    keyctl purge user bw_session &>/dev/null
+    exit_error $? "Could not load items: $ITEMS"
   fi
+
+  # create dir for cache and encrypt $ITEMS
+  mkdir -p $(dirname $CACHE_FILE)
+  echo "$ITEMS" | gpg -c --batch --passphrase $BW_HASH --cipher-algo AES256 -o $CACHE_FILE
 }
 
 exit_error() {
   local code="$1"
   local message="$2"
 
-  [ $message ] && rofi -e "$message"
+  rofi -e "$message" ${ROFI_OPTIONS[@]}
   exit "$code"
 }
 
@@ -109,13 +130,13 @@ rofi_menu() {
       -kb-custom-5 $KB_TYPEALL
       -kb-custom-6 $KB_TYPEUSER
       -kb-custom-7 $KB_TYPEPASS
+      -kb-custom-10 $KB_TYPETOTP
     )
     msg+="
-<b>$KB_TYPEALL</b>: Type all | <b>$KB_TYPEUSER</b>: Type user | <b>$KB_TYPEPASS</b>: Type pass | <b>$KB_URICOPY</b>: Copy uri"
-  else
+<b>$KB_TYPEALL</b>: Type all  | <b>$KB_TYPEUSER</b>: Type user | <b>$KB_TYPEPASS</b>: Type pass | <b>$KB_TYPETOTP</b>: Type totp"
     msg+="
 <b>$KB_URICOPY</b>: Copy uri"
-  fi
+  }
 
   rofi -dmenu -p 'Name' \
     -i -no-custom \
@@ -144,16 +165,19 @@ show_items() {
 # Similar to show_items() but using the item's ID for deduplication
 show_full_items() {
   if item=$(
+    ## Show id and name
     echo "$ITEMS" \
-    | jq -r ".[] | select( has( \"login\" )) | \"\\(.id): name: \\(.name), username: \\(.login.username)\"" \
+    | jq -r ".[] | select( has( \"login\" )) | \"name: \\(.name), username: \\(.login.username)\"" \
     | rofi_menu
   ); then
-    item_id="$(echo "$item" | cut -d ':' -f 1)"
+    username=$(echo -n $item | sed -r 's/.*username: (\w+)/\1/')
+    item_id=$(echo $ITEMS | jq -r ".[]|select(.login.username==\"$username\")|.id")
     item_array="$(array_from_id "$item_id")"
     "${ENTER_CMD[@]}" "$item_array"
   else
     rofi_exit_code=$?
-    item_id="$(echo "$item" | cut -d ':' -f 1)"
+    username=$(echo -n $item | sed -r 's/.*username: (\w+)/\1/')
+    item_id=$(echo $ITEMS | jq -r ".[]|select(.login.username==\"$username\")|.id")
     item_array="$(array_from_id "$item_id")"
     on_rofi_exit "$rofi_exit_code" "$item_array"
   fi
@@ -180,13 +204,13 @@ show_folders() {
   folders=$(bw list folders --session "$BW_HASH")
   if folder=$(echo "$folders" | jq -r '.[] | .name' | rofi_menu); then
 
-    folder_id=$(echo "$folders" | jq -r ".[] | select(.name == \"$folder\").id")
+    folder_id=$(echo "$folders" | jq -r ".[] | select(.name == $(jq_escape "$folder")).id")
 
     ITEMS=$(bw list items --folderid "$folder_id" --session "$BW_HASH")
     show_items
   else
     rofi_exit_code="$?"
-    folder_id=$(echo "$folders" | jq -r ".[] | select(.name == \"$folder\").id")
+    folder_id=$(echo "$folders" | jq -r ".[] | select(.name == $(jq_escape "$folder")).id")
     item_array=$(bw list items --folderid "$folder_id" --session "$BW_HASH")
     on_rofi_exit "$rofi_exit_code" "$item_array"
   fi
@@ -194,8 +218,11 @@ show_folders() {
 
 # re-sync the BitWarden items with the server
 sync_bitwarden() {
-  bw sync --session "$BW_HASH" &>/dev/null || exit_error 1 "Failed to sync bitwarden"
+  if ! error="$(bw --nointeraction sync --session "$BW_HASH" 2>/dev/null)"; then
+    exit_error 1 "Failed to sync bitwarden: $error"
+  fi
 
+  rm $CACHE_FILE
   load_items
   show_items
 }
@@ -213,6 +240,7 @@ on_rofi_exit() {
     14) auto_type all "$2";;
     15) auto_type username "$2";;
     16) auto_type password "$2";;
+    19) auto_type totp "$2";;
     *) exit "$1";;
   esac
 }
@@ -240,6 +268,9 @@ auto_type() {
         type_word "$(echo "$2" | jq -r '.[0].login.password')"
         copy_totp "$2"
         ;;
+      totp)
+        type_word "$(get_totp "$2")"
+        ;;
     esac
   fi
 
@@ -252,16 +283,17 @@ select_autotype_command() {
       AUTOTYPE_MODE=(sudo ydotool)
     elif [ "$XDG_SESSION_TYPE" != "wayland" ] && hash xdotool 2>/dev/null; then
       AUTOTYPE_MODE=xdotool
+      CLEAR_MODIFIERS="--clearmodifiers"
     fi
   fi
 }
 
 type_word() {
-  "${AUTOTYPE_MODE[@]}" type "$1"
+  "${AUTOTYPE_MODE[@]}" type $CLEAR_MODIFIERS "$1"
 }
 
 type_tab() {
-  "${AUTOTYPE_MODE[@]}" key Tab
+  "${AUTOTYPE_MODE[@]}" key $CLEAR_MODIFIERS Tab
 }
 
 
@@ -349,6 +381,22 @@ copy_password() {
   fi
 }
 
+# Get the TOTP
+# $1: item array
+get_totp() {
+  if not_unique "$1"; then
+    ITEMS="$item_array"
+    show_full_items
+  else
+    id=$(echo "$1" | jq -r ".[0].id")
+
+    if ! totp=$(bw --session "$BW_HASH" get totp "$id" 2>&1); then
+      exit_error 1 "$totp"
+    fi
+    echo -n "$totp"
+  fi
+}
+
 # Copy the TOTP
 # $1: item array
 copy_totp() {
@@ -356,13 +404,7 @@ copy_totp() {
     ITEMS="$item_array"
     show_full_items
   else
-    id=$(echo "$1" | jq -r ".[0].id")
-
-    if ! totp=$(bw --session "$BW_HASH" get totp "$id"); then
-      exit_error 1 "$totp"
-    fi
-
-    echo -n "$totp" | clipboard-set
+    get_totp "$1" | clipboard-set
     notify-send "TOTP Copied"
   fi
 }
@@ -463,11 +505,12 @@ Quick Actions:
   $KB_FOLDERSELECT  Search through folders
 
   $KB_TOTPCOPY  Copy the TOTP
+  $KB_URICOPY  Copy the URL
   $KB_TYPEALL  Autotype the username and password [needs xdotool or ydotool]
   $KB_TYPEUSER  Autotype the username [needs xdotool or ydotool]
   $KB_TYPEPASS  Autotype the password [needs xdotool or ydotool]
-  $KB_URICOPY  Copy the URL
-  
+  $KB_TYPETOTP  Autotype the TOTP [needs xdotool or ydotool]
+
   $KB_LOCK  Lock your vault
 
 Examples:
@@ -523,5 +566,5 @@ parse_cli_arguments "$@"
 get_session_key
 select_autotype_command
 select_copy_command
-load_items
+load_cache
 show_items
